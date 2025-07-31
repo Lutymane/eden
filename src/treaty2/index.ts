@@ -341,11 +341,21 @@ const createProxy = (
 						// fetchInit.headers['content-type'] = 'multipart/form-data'
 						fetchInit.body = formData
 					} else if (typeof body === 'object') {
-						;(fetchInit.headers as Record<string, string>)[
-							'content-type'
-						] = 'application/json'
+						if (
+							body instanceof ArrayBuffer ||
+							// Uint8Array, Float32Array and etc
+							ArrayBuffer.isView(body)
+						) {
+							;(fetchInit.headers as Record<string, string>)['content-type'] =
+								'application/octet-stream'
+						} 
+						// Don't process FormData payload and don't set headers not to break boundaries
+						else if(!(body instanceof FormData)){
+							;(fetchInit.headers as Record<string, string>)['content-type'] =
+								'application/json'
 
-						fetchInit.body = JSON.stringify(body)
+							fetchInit.body = JSON.stringify(body)
+						}
 					} else if (body !== undefined && body !== null) {
 						;(fetchInit.headers as Record<string, string>)[
 							'content-type'
