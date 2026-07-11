@@ -1,9 +1,15 @@
-import { Elysia } from 'elysia'
+import { Elysia, sse, t } from 'elysia'
 import { treaty } from '../src'
 
 const app = new Elysia()
-	.get('/', () => 'hi')
+	.get('/generator', async function* () {
+		yield 'a'
+		yield { 'hello': 'world' }
+		yield 1
+		yield true
+	})
 
-const api = treaty(app)
+const response = await treaty(app)['~path']
 
-await api.get()
+for await (const chunk of response.data!)
+	console.log('chunk', chunk)

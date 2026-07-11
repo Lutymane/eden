@@ -2,7 +2,8 @@ import type { Elysia } from 'elysia'
 
 import { EdenFetchError } from '../errors'
 import type { EdenFetch } from './types'
-import { parseStringifiedValue } from '../utils/parsingUtils'
+import { parseStringifiedValue } from '../utils/parse'
+import type { ThrowHttpError } from '../types'
 
 export type { EdenFetch } from './types'
 
@@ -30,17 +31,33 @@ const parseResponse = async (response: Response) => {
 	return response.text().then(parseStringifiedValue)
 }
 
-const handleResponse = async (response: Response, retry: () => any) => {
+const shouldThrow = (
+	error: EdenFetchError<number, unknown>,
+	throwHttpError?: ThrowHttpError
+): boolean => {
+	if (typeof throwHttpError === 'function') return throwHttpError(error)
+
+	return throwHttpError === true
+}
+
+const handleResponse = async (
+	response: Response,
+	retry: () => any,
+	throwHttpError?: ThrowHttpError
+) => {
 	const data = await parseResponse(response)
 
-	if (response.status > 300)
+	if (response.status >= 300 || response.status < 200) {
+		const error = new EdenFetchError(response.status, data)
+		if (shouldThrow(error, throwHttpError)) throw error
 		return {
 			data: null,
 			status: response.status,
 			headers: response.headers,
 			retry,
-			error: new EdenFetchError(response.status, data)
+			error
 		}
+	}
 
 	return {
 		data,
@@ -56,21 +73,15 @@ export const edenFetch = <App extends Elysia<any, any, any, any, any, any, any>>
 		config?: EdenFetch.Config
 	): EdenFetch.Create<App> =>
 	// @ts-ignore
-	(endpoint: string, { query, params, body, ...options } = {}) => {
+	(endpoint: string, { query, params, body, throwHttpError: requestThrowHttpError, ...options } = {}) => {
 		if (params)
 			Object.entries(params).forEach(([key, value]) => {
 				endpoint = endpoint.replace(`:${key}`, value as string)
 			})
 
-		// @ts-ignore
-		const contentType = options.headers?.['Content-Type']
-
-		if (!contentType || contentType === 'application/json')
-			try {
-				body = JSON.stringify(body)
-			} catch (error) {}
-
 		const fetch = config?.fetcher || globalThis.fetch
+		// Per-request throwHttpError overrides config
+		const resolvedThrowHttpError = requestThrowHttpError ?? config?.throwHttpError
 
         const nonNullishQuery = query
             ? Object.fromEntries(
@@ -85,14 +96,19 @@ export const edenFetch = <App extends Elysia<any, any, any, any, any, any, any>>
             : ''
 
 		const requestUrl = `${server}${endpoint}${queryStr}`
-		const headers = body
-			? {
-					'content-type': 'application/json',
-					// @ts-ignore
-					...options.headers
-				}
-			: // @ts-ignore
-				options.headers
+		const headers = new Headers(options.headers || {})
+        const contentType = headers.get('content-type')
+        if (
+            !(body instanceof FormData) &&
+            !(body instanceof URLSearchParams) &&
+            (!contentType || contentType === 'application/json')
+        ) {
+            try {
+                body = JSON.stringify(body)
+                if (!contentType) headers.set('content-type', 'application/json')
+            } catch (error) {}
+        }
+
 		const init = {
 			...options,
 			// @ts-ignore
@@ -101,10 +117,21 @@ export const edenFetch = <App extends Elysia<any, any, any, any, any, any, any>>
 			body: body as any
 		}
 
-		const execute = () =>
-			fetch(requestUrl, init).then((response) =>
-				handleResponse(response, execute)
-			)
+	const execute = () =>
+		fetch(requestUrl, init)
+			.then((response) => handleResponse(response, execute, resolvedThrowHttpError))
+			.catch((err) => {
+				if (err instanceof EdenFetchError) throw err
+				const error = new EdenFetchError(503, err)
+				if (shouldThrow(error, resolvedThrowHttpError)) throw error
+				return {
+					data: null,
+					error,
+					status: 503,
+					headers: undefined,
+					retry: execute
+				}
+			})
 
-		return execute()
-	}
+	return execute()
+}

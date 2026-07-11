@@ -1,5 +1,7 @@
 import type { EdenFetchError } from './errors'
 
+export type ThrowHttpError = boolean | ((error: EdenFetchError<number, unknown>) => boolean)
+
 // https://stackoverflow.com/a/39495173
 type Range<F extends number, T extends number> = Exclude<
     Enumerate<T>,
@@ -46,6 +48,36 @@ export type IsUnknown<T> = IsAny<T> extends true
     : unknown extends T
     ? true
     : false
+
+type IsExactlyUnknown<T> = [T] extends [unknown]
+    ? [unknown] extends [T]
+        ? true
+        : false
+    : false;
+
+type IsUndefined<T> = [T] extends [undefined] ? true : false
+
+type IsMatchingEmptyObject<T> = [T] extends [{}]
+    ? [{}] extends [T]
+        ? true
+        : false
+    : false
+
+export type MaybeEmptyObject<
+    TObj,
+    TKey extends PropertyKey,
+    TFallback = Record<string, unknown>
+> = IsUndefined<TObj> extends true
+    ? { [K in TKey]?: TFallback }
+    : IsExactlyUnknown<TObj> extends true
+    ? { [K in TKey]?: TFallback }
+    : IsMatchingEmptyObject<TObj> extends true
+    ? { [K in TKey]?: TObj }
+    : undefined extends TObj
+    ? { [K in TKey]?: TObj }
+    : null extends TObj
+    ? { [K in TKey]?: TObj }
+    : { [K in TKey]: TObj }
 
 export type AnyTypedRoute = {
     body?: unknown

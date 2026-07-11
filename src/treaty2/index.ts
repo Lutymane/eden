@@ -6,7 +6,8 @@ import type { Treaty } from './types'
 
 import { EdenFetchError } from '../errors'
 import { EdenWS } from './ws'
-import { parseStringifiedValue } from '../utils/parsingUtils'
+import { parseStringifiedDate, parseStringifiedValue } from '../utils/parse'
+import type { ThrowHttpError } from '../types'
 
 const method = [
 	'get',
@@ -19,6 +20,14 @@ const method = [
 	'connect',
 	'subscribe'
 ] as const
+
+const shouldThrow = (
+	error: EdenFetchError<number, unknown>,
+	throwHttpError?: ThrowHttpError
+): boolean => {
+	if (typeof throwHttpError === 'function') return throwHttpError(error)
+	return throwHttpError === true
+}
 
 const locals = ['localhost', '127.0.0.1', '0.0.0.0']
 
@@ -61,16 +70,16 @@ const createNewFile = (v: File) =>
 				reader.readAsArrayBuffer(v)
 			})
 
-const processHeaders = (
+const processHeaders = async (
 	h: Treaty.Config['headers'],
 	path: string,
 	options: RequestInit = {},
 	headers: Record<string, string> = {}
-): Record<string, string> => {
+): Promise<Record<string, string>> => {
 	if (Array.isArray(h)) {
 		for (const value of h)
 			if (!Array.isArray(value))
-				headers = processHeaders(value, path, options, headers)
+				headers = await processHeaders(value, path, options, headers)
 			else {
 				const key = value[0]
 				if (typeof key === 'string')
@@ -90,7 +99,7 @@ const processHeaders = (
 			if (h instanceof Headers)
 				return processHeaders(h, path, options, headers)
 
-			const v = h(path, options)
+			const v = await h(path, options)
 			if (v) return processHeaders(v, path, options, headers)
 			return headers
 
@@ -112,25 +121,110 @@ const processHeaders = (
 	}
 }
 
-export async function* streamResponse(response: Response) {
+function parseSSEBlock(
+	block: string,
+	options?: { parseDate?: boolean }
+): Record<string, unknown> | null {
+	const lines = block.split('\n')
+	const result: Record<string, unknown> = {}
+
+	for (const line of lines) {
+		if (!line || line.startsWith(':')) continue
+
+		const colonIndex = line.indexOf(':')
+		if (colonIndex > 0) {
+			const key = line.slice(0, colonIndex).trim()
+			// Per SSE spec, strip single leading space if present
+			const value = line.slice(colonIndex + 1).replace(/^ /, '')
+			// Preserve empty strings per SSE spec (e.g. "data:" with no value)
+			result[key] = value ? parseStringifiedValue(value, options) : value
+		}
+	}
+
+	return Object.keys(result).length > 0 ? result : null
+}
+
+/**
+ * Extracts complete SSE events from buffer, yielding parsed events.
+ * Mutates bufferRef.value to remove consumed events.
+ */
+function* extractEvents(
+	bufferRef: {
+		value: string
+	},
+	options?: { parseDate?: boolean }
+): Generator<Record<string, unknown>> {
+	let eventEnd: number
+	while ((eventEnd = bufferRef.value.indexOf('\n\n')) !== -1) {
+		const eventBlock = bufferRef.value.slice(0, eventEnd)
+		bufferRef.value = bufferRef.value.slice(eventEnd + 2)
+
+		if (eventBlock.trim()) {
+			const parsed = parseSSEBlock(eventBlock, options)
+			if (parsed) yield parsed
+		}
+	}
+}
+
+export async function* streamResponse(
+	response: Response,
+	options?: { parseDate?: boolean }
+) {
 	const body = response.body
 
 	if (!body) return
 
 	const reader = body.getReader()
-	const decoder = new TextDecoder()
+	const decoder = new TextDecoder('utf-8')
 
-	try {
-		while (true) {
-			const { done, value } = await reader.read()
-			if (done) break
+	if (response.headers.get('Content-Type')?.startsWith('text/event-stream')) {
+		const bufferRef = { value: '' }
 
-			const data = decoder.decode(value)
+		try {
+			while (true) {
+				const { done, value } = await reader.read()
+				if (done) break
 
-			yield parseStringifiedValue(data)
+				const chunk =
+					typeof value === 'string'
+						? value
+						: decoder.decode(value, { stream: true })
+
+				bufferRef.value += chunk
+
+				yield* extractEvents(bufferRef, options)
+			}
+
+			const remaining = decoder.decode()
+			if (remaining) bufferRef.value += remaining
+
+			yield* extractEvents(bufferRef, options)
+
+			if (bufferRef.value.trim()) {
+				const parsed = parseSSEBlock(bufferRef.value, options)
+				if (parsed) yield parsed
+			}
+		} finally {
+			reader.releaseLock()
 		}
-	} finally {
-		reader.releaseLock()
+	} else {
+		try {
+			while (true) {
+				const { done, value } = await reader.read()
+				if (done) break
+
+				yield parseStringifiedValue(
+					typeof value === 'string'
+						? value
+						: decoder.decode(value, { stream: true }),
+					{
+						parseDate: options?.parseDate
+					}
+				)
+			}
+		} finally {
+			reader.releaseLock()
+		}
 	}
 }
 
@@ -142,12 +236,15 @@ const createProxy = (
 ): any =>
 	new Proxy(() => {}, {
 		get(_, param: string): any {
-			return createProxy(
-				domain,
-				config,
-				param === 'index' ? paths : [...paths, param],
-				elysia
+			if (param === '~path') return '/' + paths.join('/')
+
+			if (
+				paths.length === 0 &&
+				(param === 'then' || param === 'catch' || param === 'finally')
 			)
+				return undefined
+
+			return createProxy(domain, config, [...paths, param], elysia)
 		},
 		apply(_, __, [body, options]) {
 			if (
@@ -173,8 +270,6 @@ const createProxy = (
 					method === 'head' ||
 					method === 'subscribe'
 
-				headers = processHeaders(headers, path, options)
-
 				const query = isGetOrHead
 					? (body as Record<string, string | string[] | undefined>)
 							?.query
@@ -182,32 +277,30 @@ const createProxy = (
 
 				let q = ''
 				if (query) {
-					const append = (key: string, value: string) => {
+					const append = (key: string, value: unknown) => {
+						// Explicitly exclude null and undefined values from url encoding
+						// to prevent parsing string "null" / string "undefined"
+						if (value === undefined || value === null) return
+
+						if (value instanceof Date) value = value.toISOString()
+
 						q +=
 							(q ? '&' : '?') +
 							`${encodeURIComponent(key)}=${encodeURIComponent(
-								value
+								typeof value === 'object'
+									? JSON.stringify(value)
+									: value + ''
 							)}`
 					}
 
 					for (const [key, value] of Object.entries(query)) {
 						if (Array.isArray(value)) {
 							for (const v of value) append(key, v)
+
 							continue
 						}
 
-						// Explicitly exclude null and undefined values from url encoding
-						// to prevent parsing string "null" / string "undefined"
-						if (value === undefined || value === null) {
-							continue
-						}
-
-
-						if (typeof value === 'object') {
-							append(key, JSON.stringify(value))
-							continue
-						}
-						append(key, `${value}`)
+						append(key, value)
 					}
 				}
 
@@ -232,6 +325,8 @@ const createProxy = (
 				}
 
 				return (async () => {
+					headers = await processHeaders(headers, path, options)
+
 					let fetchInit = {
 						method: method?.toUpperCase(),
 						body,
@@ -241,18 +336,26 @@ const createProxy = (
 
 					fetchInit.headers = {
 						...headers,
-						...processHeaders(
+						...(await processHeaders(
 							// For GET and HEAD, options is moved to body (1st param)
 							isGetOrHead ? body?.headers : options?.headers,
 							path,
 							fetchInit
-						)
+						))
 					}
 
 					const fetchOpts =
 						isGetOrHead && typeof body === 'object'
 							? body.fetch
 							: options?.fetch
+
+					// Per-request throwHttpError overrides config
+					const requestThrowHttpError =
+						isGetOrHead && typeof body === 'object'
+							? body.throwHttpError
+							: options?.throwHttpError
+					const resolvedThrowHttpError =
+						requestThrowHttpError ?? config.throwHttpError
 
 					fetchInit = {
 						...fetchInit,
@@ -273,11 +376,11 @@ const createProxy = (
 									...temp,
 									headers: {
 										...fetchInit.headers,
-										...processHeaders(
+										...(await processHeaders(
 											temp.headers,
 											path,
 											fetchInit
-										)
+										))
 									}
 								}
 						}
@@ -289,28 +392,82 @@ const createProxy = (
 					if (hasFile(body)) {
 						const formData = new FormData()
 
+						const shouldStringify = (value: any): boolean => {
+							if (typeof value === 'string') return false
+							if (isFile(value)) return false
+
+							// Objects and Arrays should be stringified
+							if (typeof value === 'object') {
+								if (value !== null) return true
+								if (value instanceof Date) return false
+							}
+
+							return false
+						}
+
+						const prepareValue = async (
+							value: any
+						): Promise<any> => {
+							if (value instanceof File)
+								return await createNewFile(value)
+
+							if (shouldStringify(value))
+								return JSON.stringify(value)
+
+							return value
+						}
+
 						// FormData is 1 level deep
 						for (const [key, field] of Object.entries(
 							fetchInit.body
 						)) {
+							if (Array.isArray(field)) {
+								// Check if array contains non-file objects
+								// If so, stringify the entire array (for t.ArrayString())
+								// Otherwise, append each element separately (for t.Files())
+								const hasNonFileObjects = field.some(
+									(item) =>
+										typeof item === 'object' &&
+										item !== null &&
+										!isFile(item)
+								)
 
-						  if (Array.isArray(field)) {
-								for (let i = 0; i < field.length; i++) {
-									const value = (field as any)[i]
-
+								if (hasNonFileObjects) {
+									// ArrayString case: stringify the whole array
 									formData.append(
 										key as any,
-										value instanceof File
-											? await createNewFile(value)
-											: value
+										JSON.stringify(field)
 									)
+								} else {
+									// Files case: append each element separately
+									for (let i = 0; i < field.length; i++) {
+										const value = (field as any)[i]
+										const preparedValue =
+											await prepareValue(value)
+
+										formData.append(
+											key as any,
+											preparedValue
+										)
+									}
 								}
 
 								continue
 							}
 
 							if (isServer) {
-								formData.append(key, field as any)
+								if (Array.isArray(field))
+									for (const f of field) {
+										formData.append(
+											key,
+											await prepareValue(f)
+										)
+									}
+								else
+									formData.append(
+										key,
+										await prepareValue(field)
+									)
 
 								continue
 							}
@@ -334,7 +491,7 @@ const createProxy = (
 								continue
 							}
 
-							formData.append(key, field as string)
+							formData.append(key, await prepareValue(field))
 						}
 
 						// We don't do this because we need to let the browser set the content type with the correct boundary
@@ -376,20 +533,41 @@ const createProxy = (
 									...temp,
 									headers: {
 										...fetchInit.headers,
-										...processHeaders(
+										...(await processHeaders(
 											temp.headers,
 											path,
 											fetchInit
-										)
+										))
 									} as Record<string, string>
 								}
 						}
 					}
 
+					if (options?.headers?.['content-type'])
+						// @ts-ignore
+						fetchInit.headers['content-type'] =
+							options?.headers['content-type']
+
 					const url = domain + path + q
-					const response = await (elysia?.handle(
-						new Request(url, fetchInit)
-					) ?? fetcher!(url, fetchInit))
+
+					let response: Response
+
+					try {
+						response = await (elysia?.handle(
+							new Request(url, fetchInit)
+						) ?? fetcher!(url, fetchInit))
+					} catch (err) {
+						const error = new EdenFetchError(503, err)
+						if (shouldThrow(error, resolvedThrowHttpError))
+							throw error
+						return {
+							data: null,
+							error,
+							response: undefined,
+							status: 503,
+							headers: undefined
+						}
+					}
 
 					// @ts-ignore
 					let data = null
@@ -429,18 +607,30 @@ const createProxy = (
 						response.headers.get('Content-Type')?.split(';')[0]
 					) {
 						case 'text/event-stream':
-							data = streamResponse(response)
+							data = streamResponse(response, {
+								parseDate: config.parseDate
+							})
 							break
 
 						case 'application/json':
-							data = await response.json()
+							data = JSON.parse(await response.text(), (k, v) => {
+								if (typeof v !== 'string') return v
+
+								const date = parseStringifiedDate(v, {
+									parseDate: config.parseDate
+								})
+								if (date) return date
+
+								return v
+							})
 							break
+
 						case 'application/octet-stream':
 							data = await response.arrayBuffer()
 							break
 
 						case 'multipart/form-data':
-							const temp = await response.formData()
+							const temp = (await response.formData()) as FormData
 
 							data = {}
 							temp.forEach((value, key) => {
@@ -451,13 +641,29 @@ const createProxy = (
 							break
 
 						default:
-							data = await response
-								.text()
-								.then(parseStringifiedValue)
+							if (
+								response.headers
+									.get('content-type')
+									?.startsWith('text/') &&
+								response.headers.get('transfer-encoding') ===
+									'chunked' &&
+								!response.headers.has('content-length')
+							)
+								data = streamResponse(response, {
+									parseDate: config.parseDate
+								})
+							else
+								data = await response.text().then((text) =>
+									parseStringifiedValue(text, {
+										parseDate: config.parseDate
+									})
+								)
 					}
 
 					if (response.status >= 300 || response.status < 200) {
 						error = new EdenFetchError(response.status, data)
+						if (shouldThrow(error, resolvedThrowHttpError))
+							throw error
 						data = null
 					}
 
@@ -484,11 +690,12 @@ const createProxy = (
 	}) as any
 
 export const treaty = <
-	const App extends Elysia<any, any, any, any, any, any, any>
+	const App extends Elysia<any, any, any, any, any, any, any>,
+	Head extends {} = {}
 >(
 	domain: string | App,
-	config: Treaty.Config = {}
-): Treaty.Create<App> => {
+	config: Treaty.Config<Head> = {}
+): Treaty.Create<App, Head> => {
 	if (typeof domain === 'string') {
 		if (!config.keepDomain) {
 			if (!domain.includes('://'))

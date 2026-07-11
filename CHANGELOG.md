@@ -1,3 +1,80 @@
+# 1.4.10 - 24 Apr 2026
+Chore:
+- Publish under @elysia scope
+
+# 1.4.9 - 1 Apr 2026
+Feature:
+- treaty2: add `~path` for getting api path
+
+Bug fix:
+- [#256](https://github.com/elysiajs/eden/pull/256) treaty2: handle non-sse stream
+
+# 1.4.8 - 10 Feb 2026
+Bug fix:
+- override default header without type conflict
+
+# 1.4.7 - 10 Feb 2026
+Feature:
+- [#236](https://github.com/elysiajs/eden/issues/236) reconcile default headers in type-level
+- [#206](https://github.com/elysiajs/eden/issues/206), [#245](https://github.com/elysiajs/eden/pull/245) add `parseDate` option
+
+Bug fix:
+- [#247](https://github.com/elysiajs/eden/pull/247), [#246](https://github.com/elysiajs/eden/issues/246) handle network error
+- [#244](https://github.com/elysiajs/eden/issues/244) don't skip index path name
+- [#241](https://github.com/elysiajs/eden/issues/241) prevent freeze from thenable
+- [#232](https://github.com/elysiajs/eden/issues/232) accept query array
+
+# 1.4.6 - 23 Dec 2025
+Bug fix:
+- [#235](https://github.com/elysiajs/eden/pull/235) SSE stream parser with partial chunks
+- [#234](https://github.com/elysiajs/eden/pull/234) Handle network errors in treaty and edenFetch
+- [#230](https://github.com/elysiajs/eden/pull/230) properly await async headers functions in treaty
+- [#229](https://github.com/elysiajs/eden/pull/229) auto-stringify ArrayString/ObjectString in FormData
+- [#227](https://github.com/elysiajs/eden/pull/227) correct type inference for t.Date() in query parameters
+
+# 1.4.5 - 13 Nov 2025
+Improvement:
+- export `EdenFetchError`
+
+Bug fix:
+- [#221](https://github.com/elysiajs/eden/pull/221) better handling for empty header and query types
+- use `ResponseInit['headers']` instead of `HeadersInit` for response headers type
+
+# 1.4.4 - 13 Oct 2025
+Bug fix:
+- revert streaming transferEncoding chunked
+
+# 1.4.3 - 12 Oct 2025
+Bug fix:
+- [elysia#1466](https://github.com/elysiajs/elysia/issues/1466) / treaty2: unpack multiple SSE chunk
+- [#213](https://github.com/elysiajs/eden/pull/213), [#214](https://github.com/elysiajs/eden/pull/214) stream response on `transfer-encoding: chunked`
+- [#201](https://github.com/elysiajs/eden/pull/201), [#203](https://github.com/elysiajs/eden/pull/203) error codes returned in middleware are not inferred by Eden Treaty
+- [#179](https://github.com/elysiajs/eden/pull/179) formdata post, wrong inference of json payload
+- [#124](https://github.com/elysiajs/eden/pull/124) array file upload bug on server
+- [#122](https://github.com/elysiajs/eden/pull/122) ws response data type
+
+# 1.4.1 - 14 Sep 2025
+Bug fix:
+- inline object value / Elysia file cause type error
+- macro should not mark property as required
+
+# 1.4.0 - 13 Sep 2025
+Improvement:
+- support Elysia 1.4
+
+# 1.3.3 - 24 Aug 2025
+Feature:
+- treaty2: support type safe Server-Sent Events (SSE)
+- treaty2: add utility type `Treaty.Data`, `Treaty.Error` to extract data and error type from a route
+
+Bug fix:
+- [elysia#823](https://github.com/elysiajs/elysia/issues/823) treaty2: not generating for dynamic params at root
+- treaty2: parse Date in object
+- treaty2: [#196](https://github.com/elysiajs/eden/issues/196) allow custom content-type
+
+Change:
+- minimum Elysia version is set to 1.3.18
+
 # 1.3.2 - 5 May 2025
 Bug fix:
 - Unwrap FormData
@@ -12,7 +89,7 @@ Feature:
 - support Elysia 1.3
 
 Breaking Change:
-- [Treaty 2] drop the need for `.index()`
+- treaty2: drop the need for `.index()`
 
 # 1.2.0 - 23 Dec 2024
 Feature:

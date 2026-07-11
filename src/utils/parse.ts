@@ -8,10 +8,12 @@ const isShortenDate =
 export const isNumericString = (message: string) =>
     message.trim().length !== 0 && !Number.isNaN(Number(message))
 
-export const parseStringifiedDate = (value: any) => {
-    if (typeof value !== 'string') {
-        return null
-    }
+export const parseStringifiedDate = (
+    value: any,
+    options?: { parseDate?: boolean }
+) => {
+    if (typeof value !== 'string') return null
+    if (options?.parseDate === false) return null
 
     // Remove quote from stringified date
     const temp = value.replace(/"/g, '')
@@ -23,9 +25,7 @@ export const parseStringifiedDate = (value: any) => {
     ) {
         const date = new Date(temp)
 
-        if (!Number.isNaN(date.getTime())) {
-            return date
-        }
+        if (!Number.isNaN(date.getTime())) return date
     }
 
     return null
@@ -38,9 +38,12 @@ export const isStringifiedObject = (value: string) => {
     return (start === 123 && end === 125) || (start === 91 && end === 93)
 }
 
-export const parseStringifiedObject = (data: string) =>
+export const parseStringifiedObject = (
+    data: string,
+    options?: { parseDate?: boolean }
+) =>
     JSON.parse(data, (_, value) => {
-        const date = parseStringifiedDate(value)
+        const date = parseStringifiedDate(value, options)
 
         if (date) {
             return date
@@ -49,42 +52,36 @@ export const parseStringifiedObject = (data: string) =>
         return value
     })
 
-export const parseStringifiedValue = (value: string) => {
-    if (!value) {
-        return value
-    }
+export const parseStringifiedValue = (
+    value: string,
+    options?: { parseDate?: boolean }
+) => {
+    if (!value) return value
+    if (isNumericString(value)) return +value
+    if (value === 'true') return true
+    if (value === 'false') return false
 
-    if (isNumericString(value)) {
-        return +value
-    }
-
-    if (value === 'true') {
-        return true
-    }
-
-    if (value === 'false') {
-        return false
-    }
-
-    const date = parseStringifiedDate(value)
-
-    if (date) {
-        return date
+    if (options?.parseDate !== false) {
+        const date = parseStringifiedDate(value, options)
+        if (date) return date
     }
 
     if (isStringifiedObject(value)) {
         try {
-            return parseStringifiedObject(value)
+            return parseStringifiedObject(value, options)
         } catch {}
     }
 
     return value
 }
 
-export const parseMessageEvent = (event: MessageEvent) => {
+export const parseMessageEvent = (
+    event: MessageEvent,
+    options?: { parseDate?: boolean }
+) => {
     const messageString = event.data.toString()
 
     return messageString === 'null'
         ? null
-        : parseStringifiedValue(messageString)
+        : parseStringifiedValue(messageString, options)
 }
